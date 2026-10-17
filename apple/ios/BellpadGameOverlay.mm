@@ -699,7 +699,7 @@ static UIAlertController *BPProblemReportPrompt(UIViewController *presenter, UIV
 - (void)chooseGameData {
     BellpadLog(@"disc picker presented");
     UIDocumentPickerViewController *picker =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeData ] asCopy:NO];
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeItem ] asCopy:NO];
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
@@ -2200,6 +2200,61 @@ void bellpad_install_game_overlay(void) {
     else dispatch_sync(dispatch_get_main_queue(), install);
 }
 
+// Files app: On My iPhone/iPad > BellPad is the app's Documents folder (UIFileSharingEnabled).
+// A supported .iso/.gcm dropped there is validated, then moved into private Application Support,
+// exactly like a picker import. Invalid files are left where they are and logged.
+static void BellpadWriteDocumentsReadme(NSURL *documents) {
+    NSURL *readme = [documents URLByAppendingPathComponent:@"Put your ISO here.txt"];
+    if ([NSFileManager.defaultManager fileExistsAtPath:readme.path]) return;
+    NSString *text = @"Copy your Animal Crossing GAFE01 revision 0 .iso or .gcm into this folder, "
+                      "then close and reopen BellPad. It is validated and moved into BellPad's private storage.\n";
+    [text writeToURL:readme atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+static BOOL BellpadAdoptDocumentsDiscImage(NSURL *retainedURL) {
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSURL *documents = [files URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!documents) return NO;
+    [files createDirectoryAtURL:documents withIntermediateDirectories:YES attributes:nil error:nil];
+    BellpadWriteDocumentsReadme(documents);
+
+    NSArray<NSURL *> *entries = [files contentsOfDirectoryAtURL:documents
+                                     includingPropertiesForKeys:nil
+                                                        options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                          error:nil];
+    for (NSURL *candidate in entries) {
+        NSString *extension = candidate.pathExtension.lowercaseString;
+        if (![extension isEqualToString:@"iso"] && ![extension isEqualToString:@"gcm"]) continue;
+
+        const BellpadDiscValidationResult result = BellpadValidateDiscImage(candidate.fileSystemRepresentation);
+        if (!result.valid()) {
+            const std::string message = BellpadDiscValidationMessage(result);
+            BellpadLog(@"[Storage] Documents image %@ rejected: %s", candidate.lastPathComponent, message.c_str());
+            continue;
+        }
+
+        NSError *error = nil;
+        [files createDirectoryAtURL:retainedURL.URLByDeletingLastPathComponent
+        withIntermediateDirectories:YES attributes:nil error:&error];
+        if (!error) {
+            if ([files fileExistsAtPath:retainedURL.path]) {
+                [files replaceItemAtURL:retainedURL withItemAtURL:candidate backupItemName:nil
+                                options:0 resultingItemURL:nil error:&error];
+            } else {
+                [files moveItemAtURL:candidate toURL:retainedURL error:&error];
+            }
+        }
+        if (error) {
+            BellpadLog(@"[Storage] Could not adopt Documents image %@: %@",
+                       candidate.lastPathComponent, error.localizedDescription);
+            return NO;
+        }
+        BellpadLog(@"[Storage] Adopted validated game data from Documents: %@", candidate.lastPathComponent);
+        return YES;
+    }
+    return NO;
+}
+
 int bellpad_prepare_game_data_path(const char* applicationSupportPath,
                                    char* outputPath,
                                    size_t outputCapacity) {
@@ -2231,6 +2286,10 @@ int bellpad_prepare_game_data_path(const char* applicationSupportPath,
     }
     [defaults removeObjectForKey:BPChangeGameDataOnNextLaunchKey];
     [defaults removeObjectForKey:BPRemoveGameDataOnNextLaunchKey];
+    if (BellpadAdoptDocumentsDiscImage(retainedURL)) {
+        forcePicker = NO;
+        removeRetainedData = NO;
+    }
     if (!forcePicker && !removeRetainedData &&
         BellpadValidateDiscImage(retainedURL.fileSystemRepresentation).valid()) {
         BellpadLog(@"retained disc validated; startup continuing");
