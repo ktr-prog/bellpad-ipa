@@ -1,0 +1,37 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    name: Build Bellpad-unsigned.ipa
+    runs-on: macos-26         
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source (with game/Aurora submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select newest Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$xcode" ]; then sudo xcode-select -s "$xcode"; fi
+          xcodebuild -version
+
+      - name: Install build tools
+        run: brew install cmake ninja ripgrep sdl2
+
+      - name: Build device app and package unsigned IPA
+        run: ./scripts/package-unsigned-ipa.sh
+
+      - name: Upload IPA (contains no game data)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bellpad-unsigned-ipa
+          path: dist/Bellpad-unsigned.ipa
+          retention-days: 3
